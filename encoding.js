@@ -114,45 +114,11 @@
    * @param {string} string The source of code units for the stream.
    */
   function CodePointInputStream(string) {
-    /**
-     * @param {string} string Input string of UTF-16 code units.
-     * @return {Array.<number>} Code points.
-     */
-    function stringToCodePoints(string) {
-      /** @type {Array.<number>} */
-      var cps = [];
-      // Based on http://www.w3.org/TR/WebIDL/#idl-DOMString
-      var i = 0, n = string.length;
-      while (i < string.length) {
-        var c = string.charCodeAt(i);
-        if (!inRange(c, 0xD800, 0xDFFF)) {
-          cps.push(c);
-        } else if (inRange(c, 0xDC00, 0xDFFF)) {
-          cps.push(0xFFFD);
-        } else { // (inRange(cu, 0xD800, 0xDBFF))
-          if (i === n - 1) {
-            cps.push(0xFFFD);
-          } else {
-            var d = string.charCodeAt(i + 1);
-            if (inRange(d, 0xDC00, 0xDFFF)) {
-              var a = c & 0x3FF;
-              var b = d & 0x3FF;
-              i += 1;
-              cps.push(0x10000 + (a << 10) + b);
-            } else {
-              cps.push(0xFFFD);
-            }
-          }
-        }
-        i += 1;
-      }
-      return cps;
-    }
 
     /** @type {number} */
     var pos = 0;
     /** @type {Array.<number>} */
-    var cps = stringToCodePoints(string);
+    var cps = this._stringToCodePoints(string);
 
     /** @param {number} n The number of bytes (positive or negative)
      *      to advance the code point pointer by.*/
@@ -175,6 +141,37 @@
       return cps[pos];
     };
   }
+
+  CodePointInputStream.prototype._stringToCodePoints = function(string) {
+    /** @type {Uint16Array} */
+    var cps = new Uint16Array(string.length);
+    // Based on http://www.w3.org/TR/WebIDL/#idl-DOMString
+    var i = 0, n = string.length;
+    while (i < n) {
+      var c = string.charCodeAt(i);
+      if (!inRange(c, 0xD800, 0xDFFF)) {
+        cps[i] = c;
+      } else if (inRange(c, 0xDC00, 0xDFFF)) {
+        cps[i] = 0xFFFD;
+      } else { // (inRange(cu, 0xD800, 0xDBFF))
+        if (i === n - 1) {
+          cps[i] = 0xFFFD;
+        } else {
+          var d = string.charCodeAt(i + 1);
+          if (inRange(d, 0xDC00, 0xDFFF)) {
+            var a = c & 0x3FF;
+            var b = d & 0x3FF;
+            i += 1;
+            cps[i] = 0x10000 + (a << 10) + b;
+          } else {
+            cps[i] = 0xFFFD;
+          }
+        }
+      }
+      i += 1;
+    }
+    return cps;
+  };
 
   /**
    * @constructor
@@ -805,43 +802,55 @@
    */
   function UTF8Encoder(options) {
     var fatal = options.fatal;
-    /**
-     * @param {ByteOutputStream} output_byte_stream Output byte stream.
-     * @param {CodePointInputStream} code_point_pointer Input stream.
-     * @return {number} The last byte emitted.
-     */
-    this.encode = function(output_byte_stream, code_point_pointer) {
-      var code_point = code_point_pointer.get();
-      if (code_point === EOF_code_point) {
-        return EOF_byte;
-      }
-      code_point_pointer.offset(1);
-      if (inRange(code_point, 0xD800, 0xDFFF)) {
-        return encoderError(code_point);
-      }
-      if (inRange(code_point, 0x0000, 0x007f)) {
-        return output_byte_stream.emit(code_point);
-      }
-      var count, offset;
-      if (inRange(code_point, 0x0080, 0x07FF)) {
-        count = 1;
-        offset = 0xC0;
-      } else if (inRange(code_point, 0x0800, 0xFFFF)) {
-        count = 2;
-        offset = 0xE0;
-      } else if (inRange(code_point, 0x10000, 0x10FFFF)) {
-        count = 3;
-        offset = 0xF0;
-      }
-      var result = output_byte_stream.emit(
-          div(code_point, Math.pow(64, count)) + offset);
-      while (count > 0) {
-        var temp = div(code_point, Math.pow(64, count - 1));
-        result = output_byte_stream.emit(0x80 + (temp % 64));
-        count -= 1;
-      }
-      return result;
-    };
+    this.length = 0;
+  }
+
+  /**
+   * @param {Uint8Array} output_byte_stream Output byte stream.
+   * @param {CodePointInputStream} code_point_pointer Input stream.
+   * @return {number} The last byte emitted.
+   */
+  UTF8Encoder.prototype.encode = function(output_byte_stream, code_point_pointer) {
+    var code_point = code_point_pointer.get();
+    if (code_point === EOF_code_point) {
+      return EOF_byte;
+    }
+    code_point_pointer.offset(1);
+    if (inRange(code_point, 0xD800, 0xDFFF)) {
+      return encoderError(code_point);
+    }
+
+    if (inRange(code_point, 0x0000, 0x007f)) {
+      output_byte_stream.setUint8(this.length, code_point);
+      this.length++;
+      return code_point;
+    }
+    var count, offset;
+    if (inRange(code_point, 0x0080, 0x07FF)) {
+      count = 1;
+      offset = 0xC0;
+    } else if (inRange(code_point, 0x0800, 0xFFFF)) {
+      count = 2;
+      offset = 0xE0;
+    } else if (inRange(code_point, 0x10000, 0x10FFFF)) {
+      count = 3;
+      offset = 0xF0;
+    }
+    var result = div(code_point, Math.pow(64, count)) + offset;
+    output_byte_stream.setUint8(this.length, result);
+    while (count > 0) {
+      this.length++;
+      var temp = div(code_point, Math.pow(64, count - 1));
+      result = 0x80 + (temp % 64);
+      result = output_byte_stream.setUint8(this.length, result);
+      count -= 1;
+    }
+    this.length++;
+    return result;
+  };
+
+  UTF8Encoder.prototype.maxLength = function(string) {
+    return string.length * 4; // Possibly 4 bytes per character in modern UTF8
   }
 
   name_to_encoding['utf-8'].getEncoder = function(options) {
@@ -2296,8 +2305,8 @@
     if (!this || this === global) {
       return new TextEncoder(opt_encoding, options);
     }
-    opt_encoding = opt_encoding ? String(opt_encoding) : DEFAULT_ENCODING;
-    options = Object(options);
+    opt_encoding = opt_encoding || DEFAULT_ENCODING;
+    options = options || {};
     /** @private */
     this._encoding = getEncoding(opt_encoding);
     if (this._encoding === null || (this._encoding.name !== 'utf-8' &&
@@ -2309,7 +2318,7 @@
     /** @private */
     this._encoder = null;
     /** @private @type {{fatal: boolean}=} */
-    this._options = { fatal: Boolean(options.fatal) };
+    this._options = { fatal: options.fatal ? true : false };
 
     if (Object.defineProperty) {
       Object.defineProperty(
@@ -2328,16 +2337,20 @@
      * @param {{stream: boolean}=} options
      */
     encode: function encode(opt_string, options) {
-      opt_string = opt_string ? String(opt_string) : '';
-      options = Object(options);
+      if (!opt_string) {
+        return new Uint8Array();
+      }
+      options = options || {};
       // TODO: any options?
       if (!this._streaming) {
         this._encoder = this._encoding.getEncoder(this._options);
       }
-      this._streaming = Boolean(options.stream);
+      this._streaming = options.stream ? true : false;
 
       var bytes = [];
-      var output_stream = new ByteOutputStream(bytes);
+      //var output_stream = new ByteOutputStream(bytes);
+      var output_buffer = new ArrayBuffer(this._encoder.maxLength(opt_string));
+      var output_stream = new DataView(output_buffer);
       var input_stream = new CodePointInputStream(opt_string);
       while (input_stream.get() !== EOF_code_point) {
         this._encoder.encode(output_stream, input_stream);
@@ -2347,9 +2360,10 @@
         do {
           last_byte = this._encoder.encode(output_stream, input_stream);
         } while (last_byte !== EOF_byte);
+        var length = this._encoder.length;
         this._encoder = null;
       }
-      return new Uint8Array(bytes);
+      return new Uint8Array(output_stream.buffer.slice(0, length));
     }
   };
 
